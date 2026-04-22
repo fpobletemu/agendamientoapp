@@ -13,7 +13,7 @@ export default async function DashboardPage() {
     .from('profiles')
     .select('full_name')
     .eq('id', user.id)
-    .single()
+    .single() as { data: { full_name: string | null } | null }
 
   return (
     <div className="min-h-screen bg-background p-8">
