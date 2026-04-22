@@ -1,0 +1,51 @@
+# PROMPT MAESTRO: DESARROLLO DE PLATAFORMA SAAS DE AGENDAMIENTO
+
+**Actúa como un Senior Fullstack Architect y Software Engineer.** Vamos a construir una aplicación SaaS Multi-tenant de agendamiento para negocios de servicios (barberías, spas, detailing, etc.).
+
+## 1. STACK TECNOLÓGICO Y ENTORNO
+* **Frontend:** Next.js 14+ (App Router) con TypeScript.
+* **UI:** Tailwind CSS + Shadcn/UI (Radix UI).
+* **Backend/Base de Datos:** Supabase (PostgreSQL).
+* **Seguridad:** Row Level Security (RLS) y Supabase Auth.
+* **Pagos:** Integración con Mercado Pago, Webpay (Transbank) y Flow.
+* **Versionamiento:** Git (Estructura de ramas develop/main).
+
+## 2. MODELO DE DATOS (POSTGRESQL)
+Diseña el esquema asegurando el aislamiento de datos (Multi-tenancy):
+* **`profiles`**: Información de usuarios (vinculado a auth.users).
+* **`businesses`**: Entidad principal (ID, nombre, slug de URL, logo, owner_id).
+* **`branches`**: N sucursales por negocio con horarios y ubicación propios.
+* **`roles` & `permissions`**: Tablas maestras para el sistema RBAC.
+* **`user_access`**: Tabla de control de acceso. Vincula [user_id + role_id] con un contexto de [business_id] o [branch_id].
+* **`services`**: Catálogo de servicios por negocio (duración, precio).
+* **`appointments`**: Gestión de citas con estados (pendiente, confirmada, pagada, cancelada).
+* **`payments`**: Registro de transacciones vinculadas a citas y pasarelas externas.
+
+## 3. SISTEMA DE ROLES Y PERMISOS (RBAC CONSOLIDADO)
+Implementar los siguientes niveles de acceso según el contexto:
+1.  **SUPER_ADMIN (Global):** Control total del ecosistema SaaS.
+2.  **APP_STAFF (Global):** Soporte técnico y gestión de negocios registrados.
+3.  **BUSINESS_OWNER (Negocio):** Dueño de la marca. Acceso a todas sus sucursales y finanzas.
+4.  **BRANCH_MANAGER (Sucursal):** Gestiona agenda y staff de una sede específica.
+5.  **BUSINESS_STAFF (Personal):** Solo ve y gestiona su propia agenda de trabajo.
+6.  **CUSTOMER (Público):** Reserva servicios y gestiona sus pagos/historial.
+
+## 4. INTEGRACIÓN DE PAGOS
+Configurar la arquitectura para procesar pagos locales (Chile/Latam):
+* Lógica para cobro de señas o pago total al momento de reservar.
+* Uso de Webhooks para actualizar automáticamente el estado de la cita en Supabase.
+* Capacidad de manejar múltiples credenciales API (para que cada negocio cobre en su propia cuenta).
+
+## 5. GUÍA DE CONFIGURACIÓN (SUPABASE CLI)
+Proporciona los pasos exactos para:
+1.  **Inicialización:** Comandos `supabase init` y vinculación mediante la URI de conexión (`supabase link --project-ref <id>`).
+2.  **Migraciones:** Cómo crear y aplicar archivos `.sql` en `/supabase/migrations` para replicar el modelo local en la nube.
+3.  **Políticas RLS:** Generar scripts para proteger las tablas de modo que ningún usuario pueda leer datos de un `business_id` que no le corresponde.
+
+## 6. ENTREGABLES SOLICITADOS (FASE 1)
+1.  **Script SQL Maestro:** Definición de tablas, relaciones, roles y políticas RLS.
+2.  **Arquitectura de Carpetas:** Estructura del proyecto Next.js (App Router).
+3.  **Middleware de Auth:** Código en TypeScript para validar roles y contextos en las rutas protegidas.
+4.  **Guía de Setup:** Instrucciones para configurar el entorno local y conectar la DB.
+
+**¿Estás listo para proponer el esquema de base de datos y la estructura inicial del proyecto?**

@@ -1,0 +1,339 @@
+# PROMPT MAESTRO v2: PLATAFORMA SAAS MULTI-TENANT DE AGENDAMIENTO
+
+## ROL Y CONTEXTO
+
+Actúa como **Senior Fullstack Architect** especializado en SaaS B2B. Vamos a construir una plataforma de agendamiento multi-tenant para negocios de servicios (barberías, spas, detailing, centros de estética, etc.) orientada al mercado latinoamericano.
+
+**Objetivo del producto:** Permitir que múltiples negocios (tenants) gestionen su agenda, personal y pagos desde una sola plataforma, con un portal de reservas público para sus clientes.
+
+---
+
+## 1. STACK TECNOLÓGICO
+
+| Capa | Tecnología | Notas |
+|---|---|---|
+| Frontend | Next.js 14+ (App Router) + TypeScript | SSR/SSG según la ruta |
+| UI | Tailwind CSS + Shadcn/UI (Radix UI) | Tema por tenant (colores/logo) |
+| Backend/DB | Supabase (PostgreSQL 15+) | BaaS principal |
+| Auth | Supabase Auth + JWT | Roles en JWT claims |
+| Seguridad | Row Level Security (RLS) | Aislamiento de datos por tenant |
+| Pagos | Mercado Pago, Webpay (Transbank), Flow | Credenciales por tenant |
+| Notificaciones | Resend (email) + Twilio (SMS) | Confirmaciones y recordatorios |
+| Deploy | Vercel (frontend) + Supabase Cloud | |
+| Versionamiento | Git con ramas `develop` / `staging` / `main` | |
+
+**Restricción crítica:** Cada tenant debe ser incapaz de acceder a datos de otro tenant en cualquier capa (DB, API, UI).
+
+---
+
+## 2. MODELO DE DATOS (POSTGRESQL)
+
+### Estrategia Multi-tenancy
+Usar **shared database, shared schema** con `business_id` como discriminador en todas las tablas de negocio. RLS garantiza el aislamiento. No usar schemas separados por tenant.
+
+### Tablas requeridas
+
+#### Plataforma (scope global)
+```
+profiles          → Extiende auth.users (nombre, avatar, teléfono, locale)
+subscription_plans → Planes SaaS (free, starter, pro, enterprise) con límites
+businesses        → Tenant principal (nombre, slug, logo, owner_id, plan_id, timezone)
+```
+
+#### Estructura del negocio
+```
+branches          → Sucursales del negocio (dirección, horario base, teléfono)
+branch_schedules  → Horario semanal por sucursal (día, hora_inicio, hora_fin, activo)
+services          → Catálogo de servicios (nombre, descripción, duración_min, precio, color)
+staff_profiles    → Perfil laboral del staff (bio, foto, activo)
+staff_services    → Qué servicios puede realizar cada staff member
+staff_schedules   → Disponibilidad del staff por día (puede diferir del horario de sucursal)
+blocked_times     → Bloqueos de agenda (vacaciones, ausencias, mantenimiento)
+```
+
+#### RBAC
+```
+roles             → Catálogo de roles del sistema (nombre, scope: global|business|branch)
+permissions       → Catálogo de permisos (recurso + acción: appointments:create)
+role_permissions  → Tabla de cruce roles ↔ permisos
+user_access       → Vincula [user_id + role_id] con [business_id] y/o [branch_id]
+```
+
+#### Operaciones
+```
+customers         → Perfil del cliente final (puede ser usuario registrado o invitado)
+appointments      → Cita: branch_id, service_id, staff_id, customer_id, start_at, end_at
+                    Estados: pending | confirmed | paid | in_progress | completed | cancelled | no_show
+appointment_notes → Notas internas sobre una cita (staff/manager only)
+waitlist          → Lista de espera para servicios con alta demanda
+```
+
+#### Pagos
+```
+payment_configs   → Credenciales de pasarela por negocio (encriptadas, una fila por gateway)
+payments          → Transacción: appointment_id, gateway, amount, currency, status, gateway_tx_id
+payment_events    → Log inmutable de webhooks recibidos (idempotency_key único)
+refunds           → Registro de devoluciones vinculadas a un payment_id
+```
+
+#### Comunicaciones
+```
+notification_templates → Plantillas de email/SMS por tipo de evento y por negocio
+notification_log       → Registro de notificaciones enviadas (para no duplicar)
+```
+
+### Campos obligatorios en todas las tablas
+- `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+- `created_at TIMESTAMPTZ DEFAULT now()`
+- `updated_at TIMESTAMPTZ DEFAULT now()`
+- Trigger automático para actualizar `updated_at`
+
+---
+
+## 3. SISTEMA RBAC
+
+### Definición de roles y alcance
+
+| Rol | Scope | Descripción |
+|---|---|---|
+| `SUPER_ADMIN` | Global | Control total del ecosistema SaaS |
+| `APP_STAFF` | Global | Soporte: puede impersonar negocios para debugging |
+| `BUSINESS_OWNER` | Negocio | Dueño: acceso total a todas sus sucursales y finanzas |
+| `BRANCH_MANAGER` | Sucursal | Gestiona agenda, staff y servicios de una sede |
+| `BUSINESS_STAFF` | Sucursal | Ve y gestiona solo su propia agenda |
+| `CUSTOMER` | Público | Reserva servicios, ve su historial |
+
+### Matriz de permisos clave (ejemplos)
+
+| Permiso | SUPER_ADMIN | BUSINESS_OWNER | BRANCH_MANAGER | BUSINESS_STAFF | CUSTOMER |
+|---|---|---|---|---|---|
+| `businesses:create` | ✓ | — | — | — | — |
+| `branches:manage` | ✓ | ✓ | — | — | — |
+| `appointments:create` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `appointments:view_all` | ✓ | ✓ | ✓ | — | — |
+| `payments:refund` | ✓ | ✓ | — | — | — |
+| `payment_configs:manage` | ✓ | ✓ | — | — | — |
+
+### Implementación en JWT
+El token debe incluir claims: `role`, `business_id`, `branch_id` (cuando aplique). El middleware de Next.js valida estos claims antes de cada request.
+
+---
+
+## 4. LÓGICA DE NEGOCIO: RESERVAS
+
+### Reglas de disponibilidad
+1. Un slot está disponible si: el staff trabaja ese día + la sucursal está abierta + no hay cita ni bloqueo solapado.
+2. Calcular `end_at = start_at + service.duracion_min`.
+3. Respetar buffer de tiempo opcional entre citas (configurable por negocio).
+4. Una cita no confirmada (pending) libera el slot si no se paga en N minutos (configurable).
+
+### Estados y transiciones de cita
+```
+pending → confirmed (pago señal o confirmación manual)
+confirmed → paid (pago total)
+confirmed | paid → in_progress (automático por hora)
+in_progress → completed (manual por staff)
+pending | confirmed | paid → cancelled (con lógica de reembolso según política)
+confirmed | paid → no_show (si cliente no asiste)
+```
+
+### Política de cancelación y reembolsos
+- Configurable por negocio: reembolso completo si cancela con X horas de anticipación.
+- Sin reembolso pasado el umbral o en caso de no_show.
+- El flujo de reembolso dispara a la pasarela y registra en `refunds`.
+
+---
+
+## 5. INTEGRACIÓN DE PAGOS
+
+### Arquitectura multi-credencial
+- Cada negocio configura sus propias credenciales en `payment_configs` (almacenadas encriptadas con `pgcrypto` o Vault de Supabase).
+- El backend selecciona las credenciales del tenant correcto en cada transacción.
+- **Nunca** exponer credenciales al frontend.
+
+### Flujo de pago
+1. Cliente selecciona servicio y horario → se crea cita en estado `pending`.
+2. Backend crea preferencia de pago en la pasarela con `appointment_id` como referencia externa.
+3. Cliente completa el pago en la pasarela.
+4. Webhook de la pasarela llega al endpoint `/api/webhooks/[gateway]`.
+5. Backend valida firma del webhook, verifica idempotencia, actualiza estado de cita y payment.
+
+### Pasarelas a integrar
+- **Mercado Pago:** Checkout Pro / Checkout API
+- **Webpay Plus (Transbank):** Transacciones normales y diferidas
+- **Flow:** API REST estándar
+
+---
+
+## 6. POLÍTICAS RLS
+
+### Principios
+- Habilitar RLS en **todas** las tablas de negocio.
+- Las políticas leen `business_id` del contexto del usuario (función helper en DB).
+- El rol `SUPER_ADMIN` bypasea RLS mediante función con `SECURITY DEFINER`.
+
+### Función helper (ejemplo)
+```sql
+CREATE OR REPLACE FUNCTION get_user_business_id()
+RETURNS UUID AS $$
+  SELECT business_id FROM user_access
+  WHERE user_id = auth.uid()
+  LIMIT 1;
+$$ LANGUAGE sql SECURITY DEFINER;
+```
+
+### Política ejemplo para `appointments`
+```sql
+-- Los usuarios solo ven citas de su negocio
+CREATE POLICY "appointments_tenant_isolation"
+ON appointments FOR ALL
+USING (branch_id IN (
+  SELECT id FROM branches WHERE business_id = get_user_business_id()
+));
+```
+
+---
+
+## 7. ESTRUCTURA DE CARPETAS (NEXT.JS APP ROUTER)
+
+```
+/
+├── app/
+│   ├── (public)/               → Rutas sin auth (landing, login, booking widget)
+│   │   ├── [slug]/             → Portal de reservas del negocio
+│   │   └── auth/               → Login, registro, reset
+│   ├── (dashboard)/            → Rutas protegidas con layout de dashboard
+│   │   ├── admin/              → SUPER_ADMIN y APP_STAFF
+│   │   ├── [businessSlug]/     → Contexto del negocio
+│   │   │   ├── overview/
+│   │   │   ├── branches/
+│   │   │   ├── services/
+│   │   │   ├── staff/
+│   │   │   ├── appointments/
+│   │   │   └── settings/
+│   │   └── [businessSlug]/[branchId]/  → Contexto de sucursal
+│   └── api/
+│       ├── webhooks/[gateway]/  → Endpoints de webhooks de pago
+│       ├── appointments/
+│       └── availability/
+├── components/
+│   ├── ui/                     → Shadcn/UI base
+│   ├── booking/                → Componentes del flujo de reserva
+│   ├── dashboard/              → Componentes del panel de gestión
+│   └── shared/
+├── lib/
+│   ├── supabase/               → Clientes (server, client, admin)
+│   ├── payments/               → Adaptadores por pasarela
+│   ├── notifications/          → Servicio de email/SMS
+│   └── rbac/                   → Helpers de verificación de permisos
+├── middleware.ts                → Protección de rutas + validación de roles
+├── supabase/
+│   ├── migrations/             → Archivos .sql numerados
+│   └── seed.sql                → Datos iniciales (roles, permisos, plan free)
+└── .env.local                  → Variables de entorno
+```
+
+---
+
+## 8. CONFIGURACIÓN DE ENTORNOS
+
+### Variables de entorno requeridas
+```env
+# Supabase
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_ROLE_KEY=        # Solo servidor, nunca cliente
+
+# Pagos (por pasarela)
+MERCADOPAGO_ACCESS_TOKEN=
+TRANSBANK_COMMERCE_CODE=
+TRANSBANK_API_KEY=
+FLOW_API_KEY=
+FLOW_SECRET_KEY=
+
+# Notificaciones
+RESEND_API_KEY=
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+
+# App
+NEXT_PUBLIC_APP_URL=
+WEBHOOK_SECRET=                   # Para validar webhooks internos
+```
+
+### Entornos
+- `local` → Supabase local (`supabase start`) + pasarelas en modo sandbox
+- `staging` → Proyecto Supabase staging + Vercel preview
+- `production` → Proyecto Supabase prod + Vercel production
+
+---
+
+## 9. GUÍA SUPABASE CLI
+
+```bash
+# 1. Inicializar proyecto local
+supabase init
+supabase start
+
+# 2. Vincular con proyecto cloud
+supabase link --project-ref <PROJECT_ID>
+
+# 3. Crear nueva migración
+supabase migration new <nombre_descriptivo>
+# Editar el archivo generado en supabase/migrations/
+
+# 4. Aplicar migraciones localmente
+supabase db reset
+
+# 5. Push a cloud
+supabase db push
+
+# 6. Generar tipos TypeScript desde el schema
+supabase gen types typescript --local > lib/supabase/database.types.ts
+```
+
+---
+
+## 10. ENTREGABLES FASE 1 (ORDEN DE EJECUCIÓN)
+
+Genera los siguientes entregables en este orden exacto:
+
+### Entregable 1: Script SQL Maestro (`supabase/migrations/001_initial_schema.sql`)
+- Todas las tablas con tipos correctos, constraints y FK
+- Triggers para `updated_at`
+- Datos seed: roles, permisos, role_permissions, plan `free`
+
+### Entregable 2: Políticas RLS (`supabase/migrations/002_rls_policies.sql`)
+- Función helper `get_user_business_id()`
+- Políticas para cada tabla (SELECT, INSERT, UPDATE, DELETE por separado)
+- Tests SQL para verificar aislamiento
+
+### Entregable 3: Tipos TypeScript (`lib/supabase/database.types.ts`)
+- Generado desde el schema, o escrito a mano si es más claro
+- Incluir tipos helper: `Tables<T>`, `Insert<T>`, `Update<T>`
+
+### Entregable 4: Middleware de Auth (`middleware.ts`)
+- Validar sesión en rutas protegidas
+- Leer claims del JWT y verificar rol/contexto
+- Redirigir al login si no autenticado, al dashboard correcto según rol
+
+### Entregable 5: Cliente Supabase (`lib/supabase/`)
+- `server.ts` → cliente para Server Components y API Routes
+- `client.ts` → cliente para Client Components
+- `admin.ts` → cliente con service_role para operaciones privilegiadas
+
+### Entregable 6: Guía de Setup Local (`SETUP.md`)
+- Requisitos previos
+- Pasos para levantar el entorno desde cero
+- Cómo poblar datos de prueba
+
+---
+
+## INSTRUCCIONES DE RESPUESTA
+
+- Genera un entregable a la vez, esperando confirmación antes del siguiente.
+- Para cada bloque de código, indica el **path completo** donde debe guardarse.
+- Si detectas una ambigüedad de diseño, señálala y propone dos opciones antes de implementar.
+- Prioriza seguridad y correctitud sobre brevedad.
+
+**Comienza con el Entregable 1: Script SQL Maestro completo.**
