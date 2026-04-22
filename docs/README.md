@@ -1,7 +1,7 @@
 # Documentación — AppAgendamientos
 
-**Última actualización:** 2026-04-22
-**Versión:** 0.1.0 (Fase 1 — Infraestructura base)
+**Última actualización:** 2026-04-21
+**Versión:** 0.2.0 (Fase 3 — Core del negocio en progreso)
 
 Plataforma SaaS multi-tenant de agendamiento para negocios de servicios (barberías, spas, detailing, etc.) orientada al mercado latinoamericano.
 
@@ -32,16 +32,20 @@ Plataforma SaaS multi-tenant de agendamiento para negocios de servicios (barber�
 
 | Módulo | Estado |
 |---|---|
-| Infraestructura (repo, Vercel, Supabase) | Completado |
-| Schema de base de datos + RLS | Completado |
-| Clientes Supabase + Middleware auth | Completado |
-| Login y registro | En progreso |
-| Dashboard base | Pendiente |
-| Gestión de negocios y sucursales | Pendiente |
-| Gestión de servicios y staff | Pendiente |
-| Motor de disponibilidad | Pendiente |
-| Widget de reserva público | Pendiente |
-| Integración de pagos | Pendiente |
+| Infraestructura (repo, Vercel, Supabase) | ✅ Completado |
+| Schema de base de datos + RLS | ✅ Completado |
+| Clientes Supabase + Middleware auth | ✅ Completado |
+| Login, registro y reset de contraseña | ✅ Completado |
+| Onboarding (crear negocio) | ✅ Completado |
+| Dashboard con sidebar responsive | ✅ Completado |
+| CRUD de sucursales | ✅ Completado |
+| CRUD de servicios | ✅ Completado |
+| Página overview y configuración de negocio | ✅ Completado |
+| Horarios de sucursal y staff | 🔄 En progreso |
+| Gestión de staff (invitación, perfiles) | 🔄 En progreso |
+| Motor de disponibilidad | ⏳ Pendiente |
+| Widget de reserva público | ⏳ Pendiente |
+| Integración de pagos | ⏳ Pendiente |
 
 ---
 
